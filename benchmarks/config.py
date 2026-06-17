@@ -1,0 +1,9 @@
+DEFAULT_NODE_NAMES = ["aggregator-1", "default-1", "default-2"]
+
+PROJECT_NAME = "Performance-Benchmark-Suite"
+TARGET_NODE_NAMES = DEFAULT_NODE_NAMES
+
+BENCHMARK_TIMEOUT_SECONDS = 7200
+POLL_INTERVAL_SECONDS = 5
+MAX_RETRIES = 3
+RAW_OUTPUT_DIR_NAME = "raw_output"
