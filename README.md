@@ -1,5 +1,7 @@
 # FLAME Technical Benchmarking Suite
 
+Maintainer: [Jules Kreuer](https://github.com/not-a-feature)
+
 This project contains a suite of benchmarks to quantify the performance and overhead of the FLAME federated learning platform.
 
 ## Architecture
