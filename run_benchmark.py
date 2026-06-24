@@ -1,4 +1,4 @@
-from benchmarks.benchmark_runner import main
+from benchmarks.cli import main
 
 
 if __name__ == "__main__":

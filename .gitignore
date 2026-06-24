@@ -1,5 +1,6 @@
 raw_output/
 benchmarks/credentials.py
+benchmarks/credentials.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

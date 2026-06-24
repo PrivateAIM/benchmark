@@ -2,8 +2,7 @@ import time
 import json
 from flame.star import StarModel, StarAnalyzer, StarAggregator
 
-
-TOTAL_ROUNDS = 10
+TOTAL_ROUNDS = 50
 
 
 class LatencyAnalyzer(StarAnalyzer):

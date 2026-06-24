@@ -1,6 +1,44 @@
 import json
 import tarfile
-from typing import Any
+import time
+from typing import Any, Callable
+
+import flame_hub
+import httpx
+
+from benchmarks.config import HTTP_RETRY_BACKOFF_SECONDS, HTTP_RETRY_MAX_ATTEMPTS
+from benchmarks.credentials import AUTH_URL, CORE_URL, PASSWORD, STORAGE_URL, USERNAME
+
+
+def call_with_retries(
+    func: Callable[..., Any],
+    *args: Any,
+    max_attempts: int = HTTP_RETRY_MAX_ATTEMPTS,
+    backoff_seconds: float = HTTP_RETRY_BACKOFF_SECONDS,
+    **kwargs: Any,
+) -> Any:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except httpx.TransportError as exception:
+            assert attempt < max_attempts, (
+                f"Exhausted {max_attempts} retries on transient network error calling "
+                f"{func.__qualname__}: {exception}"
+            )
+            print(
+                f"    [~] Transient network error in {func.__qualname__} "
+                f"({type(exception).__name__}). Retrying in {backoff_seconds:.0f}s "
+                f"({attempt}/{max_attempts})..."
+            )
+            time.sleep(backoff_seconds)
+
+
+def authenticate_clients() -> tuple[flame_hub.CoreClient, flame_hub.StorageClient]:
+    print(f"[*] Authenticating with {AUTH_URL}...")
+    auth = flame_hub.auth.PasswordAuth(username=USERNAME, password=PASSWORD, base_url=AUTH_URL)
+    core_client = flame_hub.CoreClient(base_url=CORE_URL, auth=auth)
+    storage_client = flame_hub.StorageClient(base_url=STORAGE_URL, auth=auth)
+    return core_client, storage_client
 
 
 def extract_result_payload(result_tar_path: str) -> dict[str, Any]:

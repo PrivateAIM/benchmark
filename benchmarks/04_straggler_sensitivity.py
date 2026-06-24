@@ -4,8 +4,7 @@ import time
 
 from flame.star import StarAggregator, StarAnalyzer, StarModel
 
-
-TOTAL_ROUNDS = 120
+TOTAL_ROUNDS = 50
 MAX_SLEEP_SECONDS = 0.25
 
 
@@ -80,7 +79,7 @@ class StragglerAggregator(StarAggregator):
         self.max_compute_seconds.append(round_max)
         self.min_compute_seconds.append(round_min)
         self.compute_spread_seconds.append(spread)
-        
+
         if not hasattr(self, "total_critical_compute_time_seconds"):
             self.total_critical_compute_time_seconds = 0.0
         self.total_critical_compute_time_seconds += round_max

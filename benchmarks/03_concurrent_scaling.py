@@ -6,7 +6,7 @@ from flame.star import StarModel, StarAnalyzer, StarAggregator
 
 # Keeping payload very small to isolate scheduler/contention overhead rather than network bounds
 PAYLOAD_BYTES = 1024  # 1KB
-TOTAL_ROUNDS = 200    # High number of rapid rounds to test broker/aggregator over time
+TOTAL_ROUNDS = 100   # Rapid rounds to test broker/aggregator over time
 
 
 class ConcurrentScalingAnalyzer(StarAnalyzer):
