@@ -1,29 +1,35 @@
 import os
 import time
 from typing import Any
+import flame_hub
+import httpx2
 
 from benchmarks.config import (
     RAW_OUTPUT_DIR_NAME,
     STORAGE_BENCH_FILES_PER_SIZE,
     STORAGE_BENCH_SIZES_BYTES,
 )
-from benchmarks.hub_io import ensure_analysis_bucket, ensure_project, resolve_storage_bucket_id
+from benchmarks.hub_io import (
+    ensure_analysis_bucket, ensure_project, resolve_master_image_id, resolve_storage_bucket_id,
+)
 from benchmarks.summaries import runner_side_result, write_summary
-from benchmarks.utils import authenticate_clients
+from benchmarks.utils import HTTP_RETRY_EVENTS, authenticate_clients, call_with_retries
+from benchmarks.measurements import run_metadata
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 
 
-def _run_storage_io(core_client: Any, storage_client: Any) -> dict[str, Any]:
+def _run_storage_io(core_client: Any, storage_client: Any, progress: dict) -> dict[str, Any]:
     print(f"[>>>] RUNNING BENCHMARK: storage_benchmark.py")
 
     project = ensure_project(core_client)
-    images = core_client.get_master_images()
-    assert len(images) > 0, "No master images found."
-    analysis = core_client.create_analysis(
-        name="storage-io-scratch", project_id=str(project.id), master_image_id=images[0].id
+    master_image_id = resolve_master_image_id(core_client)
+    analysis = call_with_retries(core_client.create_analysis,
+        name="storage-io-scratch", project_id=str(project.id), master_image_id=master_image_id
     )
     print(f"    [+] Created scratch analysis {analysis.id}")
+    progress["analysis_id"] = str(analysis.id)
+    progress["phase"] = "storage_io"
 
     temp_bucket = ensure_analysis_bucket(core_client, str(analysis.id), "TEMP")
     bucket_id = resolve_storage_bucket_id(temp_bucket)
@@ -41,7 +47,7 @@ def _run_storage_io(core_client: Any, storage_client: Any) -> dict[str, Any]:
             file_name = f"{size_bytes}_{file_index}.bin"
 
             write_start = time.perf_counter()
-            uploaded_files = storage_client.upload_to_bucket(
+            uploaded_files = call_with_retries(storage_client.upload_to_bucket,
                 bucket_id, {"file_name": file_name, "content": file_content}
             )
             write_seconds_by_size[size_bytes].append(time.perf_counter() - write_start)
@@ -59,7 +65,8 @@ def _run_storage_io(core_client: Any, storage_client: Any) -> dict[str, Any]:
 
         print(f"    [+] size={size_bytes} bytes: {STORAGE_BENCH_FILES_PER_SIZE} files written and read")
 
-    core_client.delete_analysis(analysis.id)
+    progress["phase"] = "cleanup"
+    call_with_retries(core_client.delete_analysis, analysis.id)
     print(f"    [+] Deleted scratch analysis {analysis.id} (cascades TEMP bucket cleanup)")
 
     write_seconds_by_size_str = {str(size): values for size, values in write_seconds_by_size.items()}
@@ -80,18 +87,30 @@ def _run_storage_io(core_client: Any, storage_client: Any) -> dict[str, Any]:
     }
 
 
-def run_storage_benchmark() -> str:
+def run_storage_benchmark(repeats: int = 3, environment: str = "", condition: str = "unspecified",
+                          node_info: dict | None = None, seed: int = 0, analysis_retries: int = 0) -> str:
     raw_output_dir = os.path.join(PROJECT_ROOT, RAW_OUTPUT_DIR_NAME)
 
     core_client, storage_client = authenticate_clients()
-    started_at = time.time()
-    payload = _run_storage_io(core_client, storage_client)
-    total_duration_seconds = time.time() - started_at
-
-    result = runner_side_result(
-        benchmark="storage_io",
-        script="storage_benchmark.py",
-        metrics=payload,
-        total_duration_seconds=total_duration_seconds,
-    )
-    return write_summary([result], raw_output_dir, prefix="storage_summary")
+    results = []
+    metadata = run_metadata(environment, condition, {} if node_info is None else node_info)
+    for repetition in range(1, repeats + 1):
+        started_at = time.perf_counter()
+        progress = {"analysis_id": "", "phase": "create"}
+        events = []
+        token = HTTP_RETRY_EVENTS.set(events)
+        try:
+            payload = _run_storage_io(core_client, storage_client, progress)
+            result = runner_side_result("storage_io", "storage_benchmark.py", payload, time.perf_counter() - started_at)
+        except (httpx2.TransportError, flame_hub.HubAPIError, RuntimeError, TimeoutError, OSError) as error:
+            result = runner_side_result("storage_io", "storage_benchmark.py", {}, time.perf_counter() - started_at)
+            result.update({"status": "Failed", "error_type": type(error).__name__,
+                           "error_message": str(error), "failed_phase": progress["phase"]})
+        finally:
+            HTTP_RETRY_EVENTS.reset(token)
+        result.update({"repetition": repetition, "attempt": 1, "final_attempt": True,
+                       "analysis_id": progress["analysis_id"], "run_metadata": metadata,
+                       "http_retry_count": len(events), "http_retry_events": events})
+        results.append(result)
+        summary = write_summary(results, raw_output_dir, prefix="storage_summary")
+    return summary

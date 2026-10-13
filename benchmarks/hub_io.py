@@ -3,24 +3,42 @@ import time
 from typing import Any
 
 import flame_hub
-import httpx
+import httpx2 as httpx
 
 from benchmarks.config import (
     CODE_BUCKET_TIMEOUT_SECONDS,
     HTTP_RETRY_BACKOFF_SECONDS,
     HTTP_RETRY_MAX_ATTEMPTS,
+    MASTER_IMAGE_GROUP,
+    MASTER_IMAGE_NAME,
     PROJECT_NAME,
 )
-from benchmarks.utils import call_with_retries
+from benchmarks.utils import HTTP_RETRY_EVENTS, call_with_retries
+
+
+def resolve_master_image_id(core_client: flame_hub.CoreClient) -> str:
+    images = call_with_retries(core_client.get_master_images)
+    matching_images = [
+        image for image in images
+        if image.group_virtual_path == MASTER_IMAGE_GROUP and image.name == MASTER_IMAGE_NAME
+    ]
+    assert len(matching_images) == 1, (
+        f"Expected exactly one image {MASTER_IMAGE_GROUP}/{MASTER_IMAGE_NAME}, "
+        f"found {len(matching_images)}."
+    )
+    return str(matching_images[0].id)
 
 
 def ensure_project(core_client: flame_hub.CoreClient) -> Any:
     print(f"[*] Ensuring project '{PROJECT_NAME}' exists...")
     projects = call_with_retries(core_client.get_projects)
     matching_projects = [project for project in projects if project.name.lower() == PROJECT_NAME.lower()]
+    master_image_id = resolve_master_image_id(core_client)
 
     if len(matching_projects) == 0:
-        project = call_with_retries(core_client.create_project, name=PROJECT_NAME)
+        project = call_with_retries(
+            core_client.create_project, name=PROJECT_NAME, master_image_id=master_image_id
+        )
         print(f"\n[!] New project '{PROJECT_NAME}' created.")
         print("[!] Please connect the MinIO Bucket by creating a Data Store for this project.")
         assert False, (
@@ -28,7 +46,12 @@ def ensure_project(core_client: flame_hub.CoreClient) -> Any:
             "Configure storage and rerun."
         )
 
-    return matching_projects[0]
+    project = matching_projects[0]
+    if str(project.master_image_id) != master_image_id:
+        project = call_with_retries(
+            core_client.update_project, project.id, master_image_id=master_image_id
+        )
+    return project
 
 
 def ensure_analysis_bucket(core_client: flame_hub.CoreClient, analysis_id: str, bucket_type: str) -> Any:
@@ -49,7 +72,7 @@ def ensure_analysis_bucket(core_client: flame_hub.CoreClient, analysis_id: str, 
 
 
 def resolve_storage_bucket_id(analysis_bucket: Any) -> str:
-    bucket_data = analysis_bucket.model_dump()
+    bucket_data = analysis_bucket.model_dump(by_alias=False)
     if "external_id" in bucket_data and bucket_data["external_id"] is not None:
         return str(bucket_data["external_id"])
     return str(bucket_data["bucket_id"])
@@ -75,14 +98,18 @@ def upload_benchmark_code(
     )
     assert len(upload_response) > 0, "Upload did not return file metadata."
 
-    time.sleep(2)
-    response = call_with_retries(
-        core_client._client.get,
-        f"analysis-bucket-files?filter[analysis_bucket_id]={code_bucket_core_id}",
-    )
-    bucket_file_payload = response.json()["data"]
-    file_ids = [entry["id"] for entry in bucket_file_payload if entry["path"] == script_name]
-    assert len(file_ids) == 1, f"Expected exactly one uploaded entrypoint file for {script_name}."
+    deadline = time.time() + CODE_BUCKET_TIMEOUT_SECONDS
+    while True:
+        bucket_files = call_with_retries(
+            core_client.find_analysis_bucket_files,
+            filter={"analysis_bucket_id": code_bucket_core_id},
+        )
+        file_ids = [str(entry.id) for entry in bucket_files if entry.path == script_name]
+        assert len(file_ids) <= 1, f"Multiple uploaded entrypoint files for {script_name}."
+        if file_ids:
+            break
+        assert time.time() < deadline, f"Uploaded entrypoint {script_name} not registered within timeout."
+        time.sleep(1)
 
     call_with_retries(
         core_client.update_analysis_bucket_file,
@@ -115,9 +142,12 @@ def download_result_tar(
                     result_tar.write(chunk)
             break
         except httpx.TransportError as exception:
-            assert attempt < HTTP_RETRY_MAX_ATTEMPTS, (
-                f"Exhausted {HTTP_RETRY_MAX_ATTEMPTS} retries downloading result tar: {exception}"
-            )
+            events = HTTP_RETRY_EVENTS.get()
+            if events is not None:
+                events.append({"call": "stream_bucket_tarball", "attempt": attempt,
+                               "error_type": type(exception).__name__, "timestamp": time.time()})
+            if attempt >= HTTP_RETRY_MAX_ATTEMPTS:
+                raise
             print(
                 f"    [~] Transient network error downloading result tar "
                 f"({type(exception).__name__}). Retrying download "

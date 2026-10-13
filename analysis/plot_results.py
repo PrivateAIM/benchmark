@@ -4,9 +4,11 @@ import json
 import os
 from collections.abc import Callable
 from typing import Any
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
+from benchmarks.measurements import experiment_statistics, sample_statistics
 
 CANONICAL_SCRIPT_BY_BENCHMARK = {
     "test_connection": "00_test_connection.py",
@@ -18,6 +20,8 @@ CANONICAL_SCRIPT_BY_BENCHMARK = {
     "no_star_baseline": "06_no_star_baseline.py",
     "storage_io": "storage_benchmark.py",
     "concurrent_launch": "concurrent_launch.py",
+    "compute_baseline": "07_compute_baseline.py",
+    "encryption": "encryption_benchmark.py",
 }
 
 # Benchmarks whose per-round time series get a generic jitter/moving-average
@@ -36,7 +40,8 @@ BOX_COLORS = ["#3498db", "#2980b9", "#1abc9c", "#16a085", "#2ecc71", "#e67e22", 
 # Summary loading
 # --------------------------------------------------------------------------- #
 def _find_latest_summary(raw_output_dir: str) -> str:
-    summary_files = glob.glob(os.path.join(raw_output_dir, "*summary_*.json"))
+    summary_files = [path for path in glob.glob(os.path.join(raw_output_dir, "*summary_*.json"))
+                     if not path.endswith(".statistics.json")]
     assert len(summary_files) > 0, "No summary files found in raw_output directory."
     return max(summary_files, key=os.path.getctime)
 
@@ -162,12 +167,12 @@ def _plot_latency_metrics(ax, metrics, node_labels, combined_node_ids) -> None:
     if per_node_samples:
         _per_node_boxplot(
             ax, per_node_samples, node_labels, combined_node_ids,
-            transform=lambda value: value / 2.0, ylabel="Seconds",
+            transform=float, ylabel="Round-trip interval (seconds)",
         )
     else:
         samples = metrics.get("effective_communication_latency_max_samples_seconds", [])
-        _colored_boxplot(ax, [[float(s) / 2.0 for s in samples]], ["Per-Communication"])
-        ax.set_ylabel("Seconds")
+        _colored_boxplot(ax, [[float(s) for s in samples]], ["Round-trip"])
+        ax.set_ylabel("Round-trip interval (seconds)")
 
 
 def _plot_large_data_metrics(ax, metrics, node_labels, combined_node_ids) -> None:
@@ -185,14 +190,13 @@ def _plot_large_data_metrics(ax, metrics, node_labels, combined_node_ids) -> Non
 
 def _plot_large_data_size_fit(ax, metrics: dict) -> None:
     sizes_bytes = metrics.get("sizes_bytes", [])
-    throughput_samples = metrics.get("effective_application_throughput_mbps_samples", [])
+    round_seconds = metrics["round_interval_seconds"]
 
     # Round 0 (size 0) is the warm-up with no throughput sample, so the recorded
     # samples align with sizes_bytes[1:].
-    fit_sizes = [float(size) for size in sizes_bytes[1 : 1 + len(throughput_samples)]]
-    assert len(fit_sizes) == len(throughput_samples), "Size/throughput sample length mismatch."
-
-    points = [(size, (size * 8) / (mbps * 1_000_000)) for size, mbps in zip(fit_sizes, throughput_samples) if mbps > 0]
+    fit_sizes = [float(size) for size in sizes_bytes[1:]]
+    assert len(fit_sizes) == len(round_seconds), "Size/round sample length mismatch."
+    points = [(size, float(seconds)) for size, seconds in zip(fit_sizes, round_seconds) if size > 0]
     assert len(points) > 0, "No non-zero throughput samples to fit."
     sizes_nonzero = [size for size, _ in points]
     round_seconds = [seconds for _, seconds in points]
@@ -206,7 +210,7 @@ def _plot_large_data_size_fit(ax, metrics: dict) -> None:
             label=f"Fit: {intercept:.3f}s + {slope * 1_000_000:.4f}s/MB",
         )
 
-    ax.set_xlabel("Payload Size (Bytes)")
+    ax.set_xlabel("Payload per analyzer (bytes)")
     ax.set_ylabel("Round Time (Seconds)")
     ax.legend()
 
@@ -229,10 +233,10 @@ def _plot_concurrent_scaling_metrics(ax, metrics, node_labels, combined_node_ids
 def _plot_storage_io_metrics(ax, metrics, node_labels, combined_node_ids) -> None:
     samples_by_size = metrics["write_seconds_by_size"]
     sizes = sorted(samples_by_size.keys(), key=lambda size: int(size))
-    datasets = [samples_by_size[size] for size in sizes]
-    labels = [f"{int(size) / 1_000_000:.3f} MB" for size in sizes]
+    datasets = [metrics[key][size] for size in sizes for key in ("write_seconds_by_size", "read_seconds_by_size")]
+    labels = [f"{int(size) / 1_000_000:.3f} MB {operation}" for size in sizes for operation in ("write", "read")]
     _colored_boxplot(ax, datasets, labels)
-    ax.set_ylabel("Write Seconds")
+    ax.set_ylabel("Read/write seconds")
 
 
 def _plot_concurrent_launch_metrics(ax, metrics, node_labels, combined_node_ids) -> None:
@@ -250,11 +254,48 @@ def _plot_concurrent_launch_metrics(ax, metrics, node_labels, combined_node_ids)
         scatter_y = [value for level in levels for value in samples_by_level[str(level)]]
         ax.scatter(scatter_x, scatter_y, color=color, alpha=0.5, label=f"{label} (per analysis)")
 
-        means = [sum(samples_by_level[str(level)]) / len(samples_by_level[str(level)]) for level in levels]
+        means = [sum(samples_by_level[str(level)]) / len(samples_by_level[str(level)])
+                 if samples_by_level[str(level)] else float("nan") for level in levels]
         ax.plot(levels, means, color=color, linewidth=2.0, marker="o", label=f"{label} (mean)")
 
     ax.set_xlabel("Concurrent Analyses Launched")
     ax.set_ylabel("Phase Duration (Seconds)")
+    ax.legend()
+
+
+def _plot_compute_baseline(ax, metrics, node_labels, combined_node_ids) -> None:
+    values = {"Local computation": metrics["local_baseline"]["compute_total_seconds"],
+              "FLAME execution": metrics["federated_execution_seconds"],
+              "FLAME lifecycle": metrics["federated_end_to_end_seconds"]}
+    values = {label: value for label, value in values.items() if value is not None}
+    ax.bar(list(values), list(values.values()), color=BOX_COLORS[:len(values)])
+    ax.set_ylabel("Seconds (same workload per analyzer)")
+    ax.set_yscale("log")
+
+
+def _plot_encryption(ax, metrics, node_labels, combined_node_ids) -> None:
+    measurements = metrics["measurements"]
+    sizes = [row["size_bytes"] for row in measurements]
+    for key, label in [("copy_seconds", "Copy reference"), ("encrypt_seconds", "ECDH/HKDF + encryption"),
+                       ("decrypt_seconds", "ECDH/HKDF + decryption")]:
+        ax.plot(sizes, [np.median(row[key]) for row in measurements], marker="o", label=label)
+    ax.set_xscale("log")
+    ax.set_xlabel("Plaintext bytes")
+    ax.set_ylabel("Local primitive time (seconds)")
+    ax.legend()
+
+
+def _plot_straggler_sweep(ax, metrics) -> None:
+    limits = metrics["delay_limits_seconds"]
+    intervals = metrics["round_interval_seconds"]
+    compute = metrics["round_critical_compute_seconds"]
+    assert len(limits) == len(intervals) == len(compute)
+    levels = sorted(set(limits))
+    for values, label in [(intervals, "Round interval"), (compute, "Critical compute")]:
+        medians = [np.median([v for d, v in zip(limits, values) if d == level]) for level in levels]
+        ax.plot(levels, medians, marker="o", label=label)
+    ax.set_xlabel("Configured maximum delay (seconds)")
+    ax.set_ylabel("Median seconds")
     ax.legend()
 
 
@@ -268,6 +309,8 @@ SUMMARY_PLOTTERS: dict[str, Callable] = {
     "concurrent_scaling": _plot_concurrent_scaling_metrics,
     "storage_io": _plot_storage_io_metrics,
     "concurrent_launch": _plot_concurrent_launch_metrics,
+    "compute_baseline": _plot_compute_baseline,
+    "encryption": _plot_encryption,
 }
 
 
@@ -294,6 +337,9 @@ def _plot_figure(plots_dir: str, base_name: str, plot_name: str, draw: Callable[
 def _plot_single_benchmark(result: dict, plots_dir: str) -> list[str]:
     benchmark_key = str(result["benchmark"])
     base_name = _canonical_script_name(result).replace(".py", "")
+    if "repetition" in result:
+        identity = result["analysis_id"][:8] or str(result["repetition"])
+        base_name += f"/run-{result['repetition']}-attempt-{result['attempt']}-{identity}"
     metrics = result["benchmark_metrics"]
     node_labels = {str(key): str(value) for key, value in result.get("node_labels", {}).items()}
     combined_node_ids = [str(node_id) for node_id in result.get("combined_node_ids", [])]
@@ -312,6 +358,9 @@ def _plot_single_benchmark(result: dict, plots_dir: str) -> list[str]:
         saved_paths.append(
             _plot_figure(plots_dir, base_name, "size_fit", lambda ax: _plot_large_data_size_fit(ax, metrics))
         )
+    if benchmark_key == "straggler_sensitivity" and "delay_limits_seconds" in metrics:
+        saved_paths.append(_plot_figure(plots_dir, base_name, "delay_sweep",
+                                       lambda ax: _plot_straggler_sweep(ax, metrics)))
 
     if benchmark_key in ROUND_SERIES_METRIC_KEYS:
         series = {key: metrics.get(key, []) for key in ROUND_SERIES_METRIC_KEYS[benchmark_key]}
@@ -325,32 +374,54 @@ def _plot_single_benchmark(result: dict, plots_dir: str) -> list[str]:
 def _plot_node_scaling_sweep(results: list[dict], plots_dir: str) -> str:
     # x-axis is the analyzer count (combined_node_ids excludes the aggregator),
     # not result["node_count"] which counts the aggregator too.
-    sweep_points = sorted(
-        (
-            (
-                len(result["combined_node_ids"]),
-                [
-                    float(s) / 2.0
-                    for s in result["benchmark_metrics"]["effective_communication_latency_max_samples_seconds"]
-                ],
-            )
-            for result in results
-        ),
-        key=lambda point: point[0],
-    )
-    node_counts = [count for count, _ in sweep_points]
-    medians = [float(np.median(samples)) for _, samples in sweep_points]
-    minimums = [min(samples) for _, samples in sweep_points]
-    maximums = [max(samples) for _, samples in sweep_points]
+    by_count = defaultdict(list)
+    for result in results:
+        samples = result["benchmark_metrics"]["round_interval_seconds"]
+        by_count[len(result["combined_node_ids"])].append(float(np.median(samples)))
+    node_counts = sorted(by_count)
+    statistics = [sample_statistics(by_count[count]) for count in node_counts]
+    medians = [row["median"] for row in statistics]
 
     def draw(ax) -> None:
         ax.plot(node_counts, medians, marker="o", color="#2980b9", label="Median Round Latency")
-        ax.fill_between(node_counts, minimums, maximums, color="#2980b9", alpha=0.2, label="Min-Max Range")
+        for count, row in zip(node_counts, statistics):
+            if row["median_bootstrap_ci95"] is not None:
+                low, high = row["median_bootstrap_ci95"]
+                ax.vlines(count, low, high, color="#2980b9", linewidth=3)
         ax.set_xlabel("Number of Analyzer Nodes")
-        ax.set_ylabel("Round Latency (Seconds)")
+        ax.set_ylabel("Round-trip interval (seconds); CI across runs")
         ax.legend()
 
     return _plot_figure(plots_dir, "05_node_scaling", "scaling_sweep", draw)
+
+
+def _plot_reliability(results: list[dict], plots_dir: str) -> str:
+    keys = sorted({row["benchmark"] for row in results})
+    def draw(ax):
+        x = np.arange(len(keys))
+        for offset, status, color in [(-0.2, "Success", "#27ae60"), (0.2, "Failed", "#c0392b")]:
+            counts = [sum(row["benchmark"] == key and row["status"] == status for row in results) for key in keys]
+            ax.bar(x + offset, counts, width=0.4, label=status, color=color)
+        ax.set_xticks(x, keys, rotation=35, ha="right")
+        ax.set_ylabel("Analysis attempts (including retries)")
+        ax.legend()
+    return _plot_figure(plots_dir, "run_statistics", "reliability", draw)
+
+
+def _plot_run_statistics(results: list[dict], plots_dir: str) -> str:
+    statistics = experiment_statistics(results)
+    def draw(ax):
+        rows = [row for row in statistics if row["total_duration_seconds"] is not None]
+        for i, row in enumerate(rows):
+            stat = row["total_duration_seconds"]
+            ax.scatter(i, stat["median"], color="#2980b9")
+            if stat["median_bootstrap_ci95"] is not None:
+                ax.vlines(i, *stat["median_bootstrap_ci95"], color="#2980b9")
+        labels = [f"{row['benchmark']} / {row['node_count']} nodes" +
+                  (f" / concurrency {row['sweep_parameter']}" if row["sweep_parameter"] is not None else "") for row in rows]
+        ax.set_xticks(range(len(labels)), labels, rotation=35, ha="right")
+        ax.set_ylabel("Lifecycle seconds: median and 95% bootstrap CI across repetitions")
+    return _plot_figure(plots_dir, "run_statistics", "duration", draw)
 
 
 def generate_plots(summary_path: str = "") -> list[str]:
@@ -362,9 +433,6 @@ def generate_plots(summary_path: str = "") -> list[str]:
     results = _load_summary(resolved_summary_path)
 
     successful_results = [result for result in results if result["status"] == "Success"]
-    if len(successful_results) == 0:
-        print("[!] No successful benchmark results to plot. Skipping plot generation.")
-        return []
 
     plots_dir = os.path.join(project_root, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -372,7 +440,9 @@ def generate_plots(summary_path: str = "") -> list[str]:
     scaling_results = [r for r in successful_results if r.get("benchmark") == "node_scaling"]
     other_results = [r for r in successful_results if r.get("benchmark") != "node_scaling"]
 
-    saved_paths: list[str] = []
+    saved_paths = [_plot_reliability(results, plots_dir)] if results else []
+    if results and all("final_attempt" in row for row in results):
+        saved_paths.append(_plot_run_statistics(results, plots_dir))
 
     # A multi-point scaling sweep is one combined plot; a lone scaling result falls
     # back to the standard per-benchmark latency plot.
@@ -383,6 +453,23 @@ def generate_plots(summary_path: str = "") -> list[str]:
 
     for benchmark_result in other_results:
         saved_paths.extend(_plot_single_benchmark(benchmark_result, plots_dir))
+    launches = [row for row in successful_results if row["benchmark"] == "concurrent_launch"
+                and "sweep_parameter" in row]
+    if launches:
+        metrics = {"build_seconds_by_level": defaultdict(list), "distribution_seconds_by_level": defaultdict(list)}
+        for row in launches:
+            for key, timing in [("build_seconds_by_level", "build_phase_seconds"),
+                                ("distribution_seconds_by_level", "distribution_phase_seconds")]:
+                value = row["timings"][timing]
+                if value is not None:
+                    metrics[key][str(row["sweep_parameter"])].append(value)
+        # A phase missed by polling remains absent rather than becoming a zero sample.
+        levels = set(metrics["build_seconds_by_level"]) | set(metrics["distribution_seconds_by_level"])
+        for values in metrics.values():
+            for level in levels:
+                values[level]
+        saved_paths.append(_plot_figure(plots_dir, "concurrent_launch", "launch_sweep",
+                                       lambda ax: _plot_concurrent_launch_metrics(ax, metrics, {}, [])))
 
     for plot_path in saved_paths:
         print(f"[+] Plot saved to {plot_path}")

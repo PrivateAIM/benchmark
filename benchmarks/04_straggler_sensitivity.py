@@ -4,15 +4,17 @@ import time
 
 from flame.star import StarAggregator, StarAnalyzer, StarModel
 
-TOTAL_ROUNDS = 50
-MAX_SLEEP_SECONDS = 0.25
+DELAY_LIMITS_SECONDS = [0.0, 0.25, 1.0, 5.0]
+REPEATS_PER_DELAY = 10
+ROUND_DELAY_LIMITS = [0.0] + [delay for delay in DELAY_LIMITS_SECONDS for _ in range(REPEATS_PER_DELAY)]
+TOTAL_ROUNDS = len(ROUND_DELAY_LIMITS)
 
 
 def _deterministic_sleep_seconds(node_id: str, round_index: int) -> float:
     seed = f"{node_id}:{round_index}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     bucket = int(digest[:8], 16) % 1000
-    return (bucket / 1000.0) * MAX_SLEEP_SECONDS
+    return (bucket / 1000.0) * ROUND_DELAY_LIMITS[round_index]
 
 
 class StragglerAnalyzer(StarAnalyzer):
@@ -93,6 +95,9 @@ class StragglerAggregator(StarAggregator):
                 "round": self.current_round,
                 "total_rounds": TOTAL_ROUNDS,
                 "round_interval_seconds": self.round_interval_seconds,
+                "delay_limits_seconds": ROUND_DELAY_LIMITS[1:],
+                "steady_state_critical_compute_seconds": sum(self.max_compute_seconds[1:]),
+                "round_critical_compute_seconds": self.max_compute_seconds[1:],
                 "compute_spread_seconds": self.compute_spread_seconds,
                 "max_compute_seconds": self.max_compute_seconds,
                 "min_compute_seconds": self.min_compute_seconds,

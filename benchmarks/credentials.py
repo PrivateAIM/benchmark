@@ -2,10 +2,10 @@ import json
 import os
 from pathlib import Path
 
-# FLAME Hub endpoints (defaults to production .net)
-AUTH_URL = "https://auth.staging.privateaim.net"
-CORE_URL = "https://core.staging.privateaim.net"
-STORAGE_URL = "https://storage.staging.privateaim.net"
+# API endpoints advertised by the benchmark hub.
+AUTH_URL = "https://hub.benchmark.privateaim.dev/auth/"
+CORE_URL = "https://hub.benchmark.privateaim.dev/core/"
+STORAGE_URL = "https://hub.benchmark.privateaim.dev/storage/"
 
 # Authentication credentials
 _path = Path(__file__).parent / "credentials.json"

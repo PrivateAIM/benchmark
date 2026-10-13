@@ -1,13 +1,16 @@
 import json
 import tarfile
 import time
+from contextvars import ContextVar
 from typing import Any, Callable
 
 import flame_hub
-import httpx
+import httpx2 as httpx
 
 from benchmarks.config import HTTP_RETRY_BACKOFF_SECONDS, HTTP_RETRY_MAX_ATTEMPTS
 from benchmarks.credentials import AUTH_URL, CORE_URL, PASSWORD, STORAGE_URL, USERNAME
+
+HTTP_RETRY_EVENTS = ContextVar("benchmark_http_retry_events", default=None)
 
 
 def call_with_retries(
@@ -21,10 +24,12 @@ def call_with_retries(
         try:
             return func(*args, **kwargs)
         except httpx.TransportError as exception:
-            assert attempt < max_attempts, (
-                f"Exhausted {max_attempts} retries on transient network error calling "
-                f"{func.__qualname__}: {exception}"
-            )
+            events = HTTP_RETRY_EVENTS.get()
+            if events is not None:
+                events.append({"call": func.__qualname__, "attempt": attempt,
+                               "error_type": type(exception).__name__, "timestamp": time.time()})
+            if attempt >= max_attempts:
+                raise
             print(
                 f"    [~] Transient network error in {func.__qualname__} "
                 f"({type(exception).__name__}). Retrying in {backoff_seconds:.0f}s "
@@ -35,9 +40,12 @@ def call_with_retries(
 
 def authenticate_clients() -> tuple[flame_hub.CoreClient, flame_hub.StorageClient]:
     print(f"[*] Authenticating with {AUTH_URL}...")
-    auth = flame_hub.auth.PasswordAuth(username=USERNAME, password=PASSWORD, base_url=AUTH_URL)
-    core_client = flame_hub.CoreClient(base_url=CORE_URL, auth=auth)
-    storage_client = flame_hub.StorageClient(base_url=STORAGE_URL, auth=auth)
+    auth = flame_hub.auth.PasswordAuth(
+        username=USERNAME, password=PASSWORD, base_url=AUTH_URL,
+        client=httpx.Client(base_url=AUTH_URL, timeout=30),
+    )
+    core_client = flame_hub.CoreClient(client=httpx.Client(base_url=CORE_URL, auth=auth, timeout=30))
+    storage_client = flame_hub.StorageClient(client=httpx.Client(base_url=STORAGE_URL, auth=auth, timeout=30))
     return core_client, storage_client
 
 

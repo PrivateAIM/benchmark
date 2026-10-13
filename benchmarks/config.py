@@ -1,13 +1,14 @@
-DEFAULT_NODE_NAMES = ["aggregator-1", "default-1", "default-2"]
+DEFAULT_NODE_NAMES = ["node-1", "node-2", "node-3", "node-4", "node-5", "node-6"]
 
 PROJECT_NAME = "Performance-Benchmark-Suite"
+MASTER_IMAGE_GROUP = "python"
+MASTER_IMAGE_NAME = "base"
 TARGET_NODE_NAMES = DEFAULT_NODE_NAMES
 
 # Prototyping defaults: small/fast. Scale these up for real measurement runs.
 BENCHMARK_TIMEOUT_SECONDS = 7200
 CODE_BUCKET_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 10
-MAX_RETRIES = 3
 RAW_OUTPUT_DIR_NAME = "raw_output"
 
 # Transient network errors (ReadTimeout, ConnectError, ...) on individual hub
@@ -17,12 +18,10 @@ RAW_OUTPUT_DIR_NAME = "raw_output"
 HTTP_RETRY_MAX_ATTEMPTS = 5
 HTTP_RETRY_BACKOFF_SECONDS = 5
 
-# Node-count scaling sweep: aggregator-1 plus default-1..default-N for each N
-# below. Only default-1 and default-2 are registered on the hub, so this is
-# capped at 2 until more nodes are registered.
-SCALING_AGGREGATOR_NODE_NAME = "aggregator-1"
-SCALING_NODE_NAME_PREFIX = "default-"
-SCALING_NODE_COUNTS = [1, 2]
+# Node-count scaling sweep: node-1 aggregates node-2 through node-6.
+SCALING_AGGREGATOR_NODE_NAME = "node-1"
+SCALING_ANALYZER_NODE_NAMES = DEFAULT_NODE_NAMES[1:]
+SCALING_NODE_COUNTS = [1, 2, 3, 4, 5]
 
 # Storage micro-benchmark: file sizes (bytes) x file count per size.
 STORAGE_BENCH_SIZES_BYTES = [1_024, 100_000, 1_000_000, 10_000_000]
